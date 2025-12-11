@@ -13,16 +13,17 @@ if GUILD_ID_STR is None:
     raise RuntimeError("環境変数 GUILD_ID が設定されていません。Render の Environment に追加してください。")
 
 GUILD_ID = int(GUILD_ID_STR)
-LOG_CATEGORY_NAME = "VCログ"
+
+LOG_CATEGORY_NAME = "VCログ"  # カテゴリ名
+LOG_CHANNEL_NAME = "vc-log"   # ★ 全員共通で使うチャンネル名
 # =====================================
 
 # Intents 設定
 intents = discord.Intents.default()
-intents.members = True          # メンバー情報（ニックネーム取得に必要）
+intents.members = True          # メンバー情報（ニックネーム取得などに必要）
 intents.voice_states = True     # VC 入退出イベント
 intents.guilds = True
 
-# commands.Bot ではなく、シンプルな Client で十分
 client = discord.Client(intents=intents)
 
 # (guild_id, member_id) -> join_time(UTC)
@@ -52,16 +53,15 @@ def format_timedelta(delta):
     return "".join(parts)
 
 
-async def get_or_create_log_channel(member: discord.Member) -> discord.TextChannel:
+async def get_or_create_log_channel(guild: discord.Guild) -> discord.TextChannel:
     """
-    メンバーに対応する VC ログ用テキストチャンネルを取得 or 作成する。
+    サーバー共通の VC ログ用テキストチャンネルを取得 or 作成する。
 
     ・カテゴリ名: LOG_CATEGORY_NAME (例: "VCログ")
-    ・チャンネル名: その人が「最初に VC に入室したときのサーバーニックネーム」
-      → 2回目以降は同じチャンネルを使い続ける
+    ・チャンネル名: LOG_CHANNEL_NAME (例: "vc-log")
+    ・全員が閲覧できて、Bot だけが書き込めるイメージ
     """
-    guild = member.guild
-    print(f"[DEBUG] get_or_create_log_channel for member {member} in guild {guild.id}")
+    print(f"[DEBUG] get_or_create_log_channel in guild {guild.id}")
 
     # カテゴリを探す or 作る
     category = discord.utils.get(guild.categories, name=LOG_CATEGORY_NAME)
@@ -69,40 +69,31 @@ async def get_or_create_log_channel(member: discord.Member) -> discord.TextChann
         print("[DEBUG] VCログカテゴリがないので作成します")
         category = await guild.create_category(LOG_CATEGORY_NAME)
 
-    # ★ チャンネル名 = 最初に入室したときのサーバーニックネーム
-    # member.display_name は「サーバーニックネーム or ユーザー名」
-    nickname = member.display_name
-    channel_name = nickname
-
-    # 既にその名前のチャンネルがカテゴリ内に存在するか？
-    channel = discord.utils.get(category.text_channels, name=channel_name)
+    # カテゴリ内に LOG_CHANNEL_NAME のチャンネルがあるか？
+    channel = discord.utils.get(category.text_channels, name=LOG_CHANNEL_NAME)
 
     if channel is None:
-        print(f"[DEBUG] ログ用テキストチャンネル {channel_name} がないので作成します")
+        print(f"[DEBUG] ログ用テキストチャンネル {LOG_CHANNEL_NAME} がないので作成します")
 
-        # 権限設定
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(
-                read_messages=False
-            ),  # 他の人には見せない
-            member: discord.PermissionOverwrite(
                 read_messages=True,
-                send_messages=False,  # ログ専用にしたいので書き込み不可
+                send_messages=False,  # 全員読み専用
             ),
             guild.me: discord.PermissionOverwrite(
                 read_messages=True,
-                send_messages=True,
+                send_messages=True,  # Botだけ書き込める
             ),
         }
 
         channel = await guild.create_text_channel(
-            name=channel_name,
+            name=LOG_CHANNEL_NAME,
             category=category,
             overwrites=overwrites,
-            topic=f"{member.display_name} のVCログ（初回ニックネーム固定）",
+            topic="全メンバー共通のVC入退出ログ",
         )
     else:
-        print(f"[DEBUG] 既存のログチャンネル {channel_name} を使用します")
+        print(f"[DEBUG] 既存のログチャンネル {LOG_CHANNEL_NAME} を使用します")
 
     return channel
 
@@ -123,12 +114,14 @@ async def on_voice_state_update(
     after: discord.VoiceState,
 ):
     """
-    VCへの入室 / 退出 / 移動を検知して、ユーザーごとのログチャンネルに記録する。
+    VCへの入室 / 退出 / 移動を検知して、共通ログチャンネルに記録する。
     退出時には滞在時間も書き込む。
     """
 
+    guild = member.guild
+
     # 対象サーバー以外のイベントは無視
-    if member.guild.id != GUILD_ID:
+    if guild.id != GUILD_ID:
         return
 
     # Botはログ対象外
@@ -157,11 +150,11 @@ async def on_voice_state_update(
         # ミュート切り替えなど、チャンネルは変わっていない場合
         return
 
-    # ここまで来たら「VCチャンネルの変化」が確定しているのでログ処理
-    log_channel = await get_or_create_log_channel(member)
+    # 共通ログチャンネル取得
+    log_channel = await get_or_create_log_channel(guild)
 
     now = datetime.now(timezone.utc)
-    key = (member.guild.id, member.id)
+    key = (guild.id, member.id)
 
     # まず「退出側」のログ（移動時にも発生する）
     if left_channel is not None:
